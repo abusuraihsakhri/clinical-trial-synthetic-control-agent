@@ -1,6 +1,35 @@
 """
-SyntheticControl-Arm: Propensity Score & G-Computation Observational Matcher
-Domain: Biomedical Scientific Discovery & Multi-Omics
-Standard: FDA Real-World Evidence (RWE) Guidance
+Synthetic Control Arm Package - Real-World Evidence & Propensity Matching Engine
 """
-__version__ = "2.0.0-FRONTIER"
+
+from .models import (
+    MatchingMethod,
+    RegulatoryAdequacyTier,
+    SubjectRecord,
+    MatchedPair,
+    CovariateBalance,
+    SurvivalCurvePoint,
+    SyntheticControlAnalysisResult,
+)
+from .engine import (
+    BiostatisticalMath,
+    PropensityScoreEngine,
+    SurvivalAnalysisEngine,
+    SyntheticControlAgentEngine,
+    parse_synthetic_cohort_dict,
+)
+
+__all__ = [
+    "MatchingMethod",
+    "RegulatoryAdequacyTier",
+    "SubjectRecord",
+    "MatchedPair",
+    "CovariateBalance",
+    "SurvivalCurvePoint",
+    "SyntheticControlAnalysisResult",
+    "BiostatisticalMath",
+    "PropensityScoreEngine",
+    "SurvivalAnalysisEngine",
+    "SyntheticControlAgentEngine",
+    "parse_synthetic_cohort_dict",
+]
