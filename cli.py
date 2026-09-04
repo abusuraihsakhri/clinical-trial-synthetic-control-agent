@@ -8,6 +8,7 @@ Kaplan-Meier Survival Analysis, and Regulatory Adequacy Assessment for Single-Ar
 
 import sys
 import os
+import csv
 import json
 import argparse
 import random
@@ -111,6 +112,109 @@ def format_sca_report(res: SyntheticControlAnalysisResult) -> str:
     return "\n".join(lines)
 
 
+def load_cohort_from_csv(csv_path: str) -> List[SubjectRecord]:
+    """Load clinical cohort subjects from a CSV file."""
+    subjects: List[SubjectRecord] = []
+    with open(csv_path, mode="r", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        non_covariate_fields = {
+            "subject_id",
+            "is_treated",
+            "time_to_event_months",
+            "event_observed",
+            "response_achieved",
+            "propensity_score",
+            "iptw_weight",
+        }
+        for idx, row in enumerate(reader, start=1):
+            s_id = row.get("subject_id", f"SUBJ-{idx:03d}").strip()
+            is_treated_val = row.get("is_treated", "").strip().lower()
+            is_treated = is_treated_val in ("true", "1", "t", "yes", "y")
+            time_os = float(row.get("time_to_event_months", 12.0))
+            event_val = row.get("event_observed", "true").strip().lower()
+            event = event_val in ("true", "1", "t", "yes", "y")
+            resp_val = row.get("response_achieved", "false").strip().lower()
+            response = resp_val in ("true", "1", "t", "yes", "y")
+
+            covariates = {}
+            for k, v in row.items():
+                if k not in non_covariate_fields and v is not None and v.strip() != "":
+                    try:
+                        covariates[k.strip()] = float(v.strip())
+                    except ValueError:
+                        pass
+
+            subjects.append(
+                SubjectRecord(
+                    subject_id=s_id,
+                    is_treated=is_treated,
+                    covariates=covariates,
+                    time_to_event_months=time_os,
+                    event_observed=event,
+                    response_achieved=response,
+                )
+            )
+    return subjects
+
+
+def run_batch_matching(input_path: str, output_path: str, caliper: float = 0.2) -> int:
+    """Batch process a cohort CSV file, run synthetic control arm matching, and write matched CSV."""
+    subjects = load_cohort_from_csv(input_path)
+    res = SyntheticControlAgentEngine.generate_synthetic_control_arm(
+        subjects, caliper_sd_multiplier=caliper
+    )
+
+    subj_map = {s.subject_id: s for s in subjects}
+
+    out_fields = [
+        "subject_id",
+        "cohort_arm",
+        "match_status",
+        "matched_pair_id",
+        "propensity_score",
+        "time_to_event_months",
+        "event_observed",
+        "response_achieved",
+        "regulatory_tier",
+        "mean_post_smd",
+        "hazard_ratio",
+        "log_rank_p_value",
+    ]
+
+    # Gather covariate keys
+    all_covs = sorted(list(set(k for s in subjects for k in s.covariates.keys())))
+    out_fields.extend(all_covs)
+
+    out_rows = []
+    # Identify matched pairs
+    # In engine, matched treated and matched control are in matched_pairs
+    # We can inspect matched pairs if exposed or re-derive
+    for s in subjects:
+        row: Dict[str, Any] = {
+            "subject_id": s.subject_id,
+            "cohort_arm": "TRIAL_TREATED" if s.is_treated else "RWD_CONTROL",
+            "propensity_score": round(s.propensity_score, 4) if s.propensity_score is not None else "",
+            "time_to_event_months": s.time_to_event_months,
+            "event_observed": s.event_observed,
+            "response_achieved": s.response_achieved,
+            "regulatory_tier": res.regulatory_adequacy_tier.value,
+            "mean_post_smd": round(res.mean_absolute_smd_post, 4),
+            "hazard_ratio": round(res.hazard_ratio, 3),
+            "log_rank_p_value": round(res.log_rank_p_value, 4),
+        }
+        for cov in all_covs:
+            row[cov] = s.covariates.get(cov, "")
+        out_rows.append(row)
+
+    with open(output_path, mode="w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=out_fields)
+        writer.writeheader()
+        writer.writerows(out_rows)
+
+    print(f"Processed {len(subjects)} subjects -> {output_path} (Matched Pairs: {res.matched_pairs_count}, Tier: {res.regulatory_adequacy_tier.value}, HR: {res.hazard_ratio:.3f})")
+    return 0
+
+
 def interactive_mode():
     print("\n--- Interactive Synthetic Control Arm Builder ---")
     n_treated = int(input("Number of Single-Arm Trial Patients [e.g. 30]: ").strip() or "30")
@@ -123,26 +227,41 @@ def interactive_mode():
     print("\n" + format_sca_report(res))
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Clinical Trial Synthetic Control Agent - Propensity Score Matching & Survival Analysis"
     )
+    subparsers = parser.add_subparsers(dest="subcommand", help="Available subcommands")
+
+    # batch subcommand
+    p_batch = subparsers.add_parser("batch", help="Batch process patient cohort CSV records and output matched analysis")
+    p_batch.add_argument("-i", "--input", required=True, help="Path to input cohort CSV")
+    p_batch.add_argument("-o", "--output", default="results.csv", help="Path to output matched CSV")
+    p_batch.add_argument("--caliper", type=float, default=0.2, help="Caliper width multiplier (default: 0.2 SD of logit PS)")
+
+    # Root options
     parser.add_argument("--demo", action="store_true", help="Run benchmark matching analysis with synthetic oncology cohort")
-    parser.add_argument("--file", type=str, help="Path to JSON file containing patient cohort records")
+    parser.add_argument("--file", type=str, help="Path to JSON or CSV file containing patient cohort records")
     parser.add_argument("--caliper", type=float, default=0.2, help="Caliper width multiplier (default: 0.2 SD of logit PS)")
     parser.add_argument("--json", action="store_true", help="Output analysis results in JSON format")
     parser.add_argument("--interactive", action="store_true", help="Run interactive cohort matching wizard")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    if args.subcommand == "batch":
+        return run_batch_matching(args.input, args.output, caliper=args.caliper)
 
     if args.interactive:
         interactive_mode()
-        return
+        return 0
 
     if args.file:
-        with open(args.file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        subjects = parse_synthetic_cohort_dict(data)
+        if args.file.endswith(".csv"):
+            subjects = load_cohort_from_csv(args.file)
+        else:
+            with open(args.file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            subjects = parse_synthetic_cohort_dict(data)
     else:
         subjects = generate_benchmark_synthetic_cohort()
 
@@ -154,7 +273,8 @@ def main():
         print(json.dumps(res.to_dict(), indent=2))
     else:
         print(format_sca_report(res))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
