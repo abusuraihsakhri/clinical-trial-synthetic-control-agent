@@ -1,5 +1,7 @@
 # Clinical Trial Synthetic Control Agent
 
+### [Open the Live Application →](https://abusuraihsakhri.github.io/clinical-trial-synthetic-control-agent/)
+
 A dependency-free Python tool for propensity-score matching and matched-cohort diagnostics in external-control analyses.
 
 ## What it does
