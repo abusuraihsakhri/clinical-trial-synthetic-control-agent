@@ -229,5 +229,37 @@ class TestJSONParsing(unittest.TestCase):
             )
 
 
+    def test_missing_numeric_json_field_is_rejected_cleanly(self):
+        with self.assertRaisesRegex(ValueError, "time_to_event_months.*numeric"):
+            parse_synthetic_cohort_dict(
+                {
+                    "subjects": [
+                        {
+                            "subject_id": "X",
+                            "is_treated": True,
+                            "covariates": {"age": 60},
+                            "event_observed": True,
+                        }
+                    ]
+                }
+            )
+
+    def test_non_finite_json_covariate_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "covariate 'age'.*finite"):
+            parse_synthetic_cohort_dict(
+                {
+                    "subjects": [
+                        {
+                            "subject_id": "X",
+                            "is_treated": True,
+                            "covariates": {"age": "nan"},
+                            "time_to_event_months": 12,
+                            "event_observed": True,
+                        }
+                    ]
+                }
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

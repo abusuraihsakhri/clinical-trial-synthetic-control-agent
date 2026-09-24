@@ -121,7 +121,14 @@ def load_cohort_from_csv(csv_path: str | Path) -> List[SubjectRecord]:
     subjects: List[SubjectRecord] = []
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
-        fieldnames = [name.strip() for name in (reader.fieldnames or []) if name]
+        raw_fieldnames = reader.fieldnames or []
+        if any(name is None or not name.strip() for name in raw_fieldnames):
+            raise ValueError("CSV column names must be non-empty.")
+        fieldnames = [name.strip() for name in raw_fieldnames]
+        if len(set(fieldnames)) != len(fieldnames):
+            raise ValueError(
+                "CSV column names must be unique after trimming whitespace."
+            )
         missing = sorted(_REQUIRED_CSV_FIELDS - set(fieldnames))
         if missing:
             raise ValueError(

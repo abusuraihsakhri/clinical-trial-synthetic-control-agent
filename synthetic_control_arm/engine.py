@@ -518,6 +518,16 @@ def _parse_bool(value: Any, field_name: str) -> bool:
     raise ValueError(f"{field_name} must be a boolean value.")
 
 
+def _parse_finite_number(value: Any, field_name: str) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be numeric.") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"{field_name} must be finite.")
+    return number
+
+
 def parse_synthetic_cohort_dict(data: Dict[str, Any]) -> List[SubjectRecord]:
     raw_subjects = data.get("subjects")
     if not isinstance(raw_subjects, list):
@@ -530,12 +540,29 @@ def parse_synthetic_cohort_dict(data: Dict[str, Any]) -> List[SubjectRecord]:
         covariates = raw.get("covariates", {})
         if not isinstance(covariates, dict):
             raise ValueError(f"Subject {index} covariates must be an object.")
+
+        parsed_covariates: Dict[str, float] = {}
+        for key, value in covariates.items():
+            name = str(key).strip()
+            if not name:
+                raise ValueError(f"Subject {index} covariate names must be non-empty.")
+            if name in parsed_covariates:
+                raise ValueError(
+                    f"Subject {index} has duplicate covariate name {name!r}."
+                )
+            parsed_covariates[name] = _parse_finite_number(
+                value, f"Subject {index} covariate {name!r}"
+            )
+
         subjects.append(
             SubjectRecord(
                 subject_id=str(raw.get("subject_id", "")).strip(),
                 is_treated=_parse_bool(raw.get("is_treated"), "is_treated"),
-                covariates={str(key): float(value) for key, value in covariates.items()},
-                time_to_event_months=float(raw.get("time_to_event_months")),
+                covariates=parsed_covariates,
+                time_to_event_months=_parse_finite_number(
+                    raw.get("time_to_event_months"),
+                    f"Subject {index} time_to_event_months",
+                ),
                 event_observed=_parse_bool(
                     raw.get("event_observed"), "event_observed"
                 ),
