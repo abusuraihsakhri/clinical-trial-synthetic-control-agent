@@ -84,7 +84,7 @@ Required columns:
 | `event_observed` | Whether the time-to-event endpoint occurred |
 | `response_achieved` | Binary response indicator |
 
-Add at least one numeric baseline covariate column, for example `age`, `ecog`, `prior_lines`, or `ldh`. Every analyzed subject must have a finite value for every selected covariate. The parser fails explicitly on missing or invalid values instead of silently coercing them to zero.
+Add at least one numeric baseline covariate column, for example `age`, `ecog`, `prior_lines`, or `ldh`. Header names must be non-empty and unique after surrounding whitespace is removed. Every analyzed subject must have a finite value for every selected covariate. The CSV and JSON parsers fail explicitly on missing, non-finite, or invalid values instead of silently coercing them to zero.
 
 ## Statistical notes
 
