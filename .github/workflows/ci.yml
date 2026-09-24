@@ -1,36 +1,51 @@
-name: Clinical Trial Synthetic Control Agent CI
+name: Test and lint
 
 on:
   push:
-    branches: [ master, main ]
+    branches: [master, main]
   pull_request:
-    branches: [ master, main ]
+    branches: [master, main]
+
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
 
     steps:
-    - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install pytest
+      - name: Install package and test tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest ruff
 
-    - name: Run Pytest Suite
-      run: |
-        python -m pytest -p no:zarr
+      - name: Lint
+        run: ruff check .
 
-    - name: Run CLI Batch Smoke Test
-      run: |
-        python cli.py batch -i sample.csv -o out_smoke.csv
-        python -c "import os; assert os.path.exists('out_smoke.csv'), 'out_smoke.csv not generated'; os.remove('out_smoke.csv')"
+      - name: Test
+        run: python -m pytest -q
+
+      - name: Verify installed CLI
+        run: |
+          clinical-trial-synthetic-control-agent --version
+          clinical-trial-synthetic-control-agent --demo --json > demo.json
+          python -m json.tool demo.json > /dev/null
+          python -m synthetic_control_arm.cli --help > /dev/null
+
+      - name: Batch export smoke test
+        run: |
+          clinical-trial-synthetic-control-agent batch -i sample.csv -o out_smoke.csv
+          python -c "from pathlib import Path; p=Path('out_smoke.csv'); assert p.is_file() and p.stat().st_size > 0"

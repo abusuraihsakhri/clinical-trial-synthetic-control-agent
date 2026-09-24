@@ -1,3 +1,1 @@
-"""
-Test package for Clinical Trial Synthetic Control Agent.
-"""
+"""Tests for clinical-trial-synthetic-control-agent."""

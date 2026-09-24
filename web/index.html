@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'unsafe-eval' 'wasm-unsafe-eval'; connect-src 'self' https://cdn.jsdelivr.net; style-src 'self'; img-src 'self' data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="description" content="Browser-based propensity-score matching and matched-cohort diagnostics for external-control analyses.">
+  <title>Synthetic Control Matcher</title>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="https://cdn.jsdelivr.net/pyodide/v314.0.7/full/pyodide.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">External-control analysis</div>
+        <h1>Synthetic Control Matcher</h1>
+        <p>Propensity-score matching, covariate balance, and matched-sample outcome diagnostics.</p>
+      </div>
+      <div class="topbar-actions">
+        <div class="runtime-pill" id="runtimeStatus" role="status" aria-live="polite">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span>Loading Python…</span>
+        </div>
+        <button class="icon-button" id="themeToggle" type="button" aria-label="Switch to dark theme" title="Toggle theme">
+          <span id="themeIcon" aria-hidden="true">◐</span>
+        </button>
+      </div>
+    </header>
+
+    <section class="workspace" aria-label="Synthetic control analysis workspace">
+      <aside class="panel controls-panel">
+        <div class="panel-heading">
+          <div>
+            <h2>Data</h2>
+            <p>Patient-level CSV; processed locally in this browser.</p>
+          </div>
+        </div>
+
+        <label class="dropzone" for="csvFile" id="dropzone">
+          <input id="csvFile" type="file" accept=".csv,text/csv">
+          <span class="drop-icon" aria-hidden="true">↥</span>
+          <span class="drop-title">Choose or drop a CSV</span>
+          <span class="drop-meta" id="fileMeta">Maximum 10 MB</span>
+        </label>
+
+        <div class="button-row">
+          <button class="secondary-button" id="sampleButton" type="button">Load sample</button>
+          <button class="secondary-button" id="clearButton" type="button" disabled>Clear</button>
+        </div>
+
+        <div class="field-block">
+          <label for="caliper">Caliper multiplier</label>
+          <div class="input-suffix">
+            <input id="caliper" type="number" min="0.01" max="2" step="0.01" value="0.20" inputmode="decimal">
+            <span>× SD(logit PS)</span>
+          </div>
+          <p class="field-help">Default 0.20. Matching is 1:1 nearest-neighbor without replacement.</p>
+        </div>
+
+        <button class="primary-button" id="analyzeButton" type="button" disabled>
+          <span>Analyze cohort</span>
+        </button>
+
+        <div class="notice compact-notice">
+          <strong>Research utility.</strong> Balance labels are heuristic diagnostics, not a regulatory determination or clinical recommendation.
+        </div>
+      </aside>
+
+      <section class="panel results-panel" aria-live="polite">
+        <div class="panel-heading results-heading">
+          <div>
+            <h2>Results</h2>
+            <p id="resultsSubtitle">Load a valid CSV to begin.</p>
+          </div>
+          <button class="secondary-button" id="downloadButton" type="button" disabled>Download CSV</button>
+        </div>
+
+        <div id="emptyState" class="empty-state">
+          <div class="empty-mark" aria-hidden="true">∿</div>
+          <h3>No analysis yet</h3>
+          <p>Use the sample cohort or select your own CSV. The Python engine runs entirely in your browser after the runtime loads.</p>
+        </div>
+
+        <div id="errorState" class="error-state" hidden role="alert">
+          <strong>Analysis could not be completed.</strong>
+          <p id="errorText"></p>
+        </div>
+
+        <div id="resultContent" class="result-content" hidden>
+          <div class="metrics-grid" id="metricsGrid"></div>
+
+          <div class="section-card">
+            <div class="section-title-row">
+              <div>
+                <h3>Covariate balance</h3>
+                <p>Absolute standardized mean difference before and after matching.</p>
+              </div>
+              <span class="assessment-badge" id="assessmentBadge"></span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Covariate</th>
+                    <th scope="col">Pre SMD</th>
+                    <th scope="col">Post SMD</th>
+                    <th scope="col">Status</th>
+                  </tr>
+                </thead>
+                <tbody id="balanceBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="section-card notes-card">
+            <h3>Interpretation notes</h3>
+            <ul id="recommendations"></ul>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <footer>
+      <span>Python 3 in WebAssembly via Pyodide · No cohort upload</span>
+      <a href="https://github.com/abusuraihsakhri/clinical-trial-synthetic-control-agent" target="_blank" rel="noopener noreferrer">Source</a>
+    </footer>
+  </main>
+</body>
+</html>

@@ -1,96 +1,88 @@
-"""
-Integration and CLI Tests for Clinical Trial Synthetic Control Agent
-=====================================================================
-Tests CLI batch processing, CSV loading, demo generation, and report formatting.
-"""
-
-import unittest
-import tempfile
-import os
 import csv
+import json
+import subprocess
 import sys
+import tempfile
+import unittest
+from pathlib import Path
 
-# Ensure root directory is in sys.path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from cli import (
-    load_cohort_from_csv,
-    run_batch_matching,
-    main,
+from synthetic_control_arm.cli import (
     generate_benchmark_synthetic_cohort,
-    format_sca_report,
-)
-from synthetic_control_arm import (
-    SubjectRecord,
-    SyntheticControlAgentEngine,
-    RegulatoryAdequacyTier,
+    load_cohort_from_csv,
+    main,
+    run_batch_matching,
 )
 
 
-class TestCLIBatchAndWorkflows(unittest.TestCase):
+class TestCLI(unittest.TestCase):
+    def test_demo_is_deterministic(self):
+        first = generate_benchmark_synthetic_cohort(3, 4)
+        second = generate_benchmark_synthetic_cohort(3, 4)
+        self.assertEqual(
+            [(s.subject_id, s.covariates) for s in first],
+            [(s.subject_id, s.covariates) for s in second],
+        )
 
-    def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.csv_input = os.path.join(self.temp_dir.name, "test_cohort.csv")
-        self.csv_output = os.path.join(self.temp_dir.name, "test_results.csv")
+    def test_sample_csv_loads(self):
+        subjects = load_cohort_from_csv(Path(__file__).parents[1] / "sample.csv")
+        self.assertEqual(len(subjects), 15)
+        self.assertEqual(sum(subject.is_treated for subject in subjects), 5)
 
-        # Create realistic test CSV
-        with open(self.csv_input, mode="w", encoding="utf-8", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                "subject_id", "is_treated", "age", "ecog", "prior_lines", "ldh",
-                "time_to_event_months", "event_observed", "response_achieved"
-            ])
-            # Treated
-            for i in range(5):
-                writer.writerow([f"TRIAL-{i+1:03d}", "True", 58.0 + i, 0.0, 1.0, 210.0 + i*5, 22.0 + i, "True", "True"])
-            # Control
-            for j in range(12):
-                writer.writerow([f"RWD-{j+1:03d}", "False", 60.0 + (j%4), float(j%2), 1.0 + float(j%3), 220.0 + j*8, 15.0 + j, "True", "False"])
+    def test_batch_output_contains_real_match_metadata(self):
+        sample = Path(__file__).parents[1] / "sample.csv"
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "results.csv"
+            self.assertEqual(run_batch_matching(sample, output, quiet=True), 0)
+            with output.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            matched = [row for row in rows if row["match_status"] == "MATCHED"]
+            self.assertTrue(matched)
+            self.assertTrue(all(row["matched_pair_id"] for row in matched))
+            self.assertTrue(all(row["matched_subject_id"] for row in matched))
+            self.assertTrue(all(row["logit_ps_distance"] for row in matched))
 
-    def tearDown(self):
-        self.temp_dir.cleanup()
+    def test_invalid_boolean_in_csv_returns_clear_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad.csv"
+            path.write_text(
+                "subject_id,is_treated,age,time_to_event_months,event_observed,response_achieved\n"
+                "T1,maybe,60,10,true,false\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "is_treated"):
+                load_cohort_from_csv(path)
 
-    def test_load_cohort_from_csv(self):
-        subjects = load_cohort_from_csv(self.csv_input)
-        self.assertEqual(len(subjects), 17)
-        treated = [s for s in subjects if s.is_treated]
-        controls = [s for s in subjects if not s.is_treated]
-        self.assertEqual(len(treated), 5)
-        self.assertEqual(len(controls), 12)
-        self.assertIn("age", subjects[0].covariates)
-        self.assertIn("ldh", subjects[0].covariates)
+    def test_package_module_help_works(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "synthetic_control_arm.cli", "--help"],
+            cwd=Path(__file__).parents[1],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Propensity-score matching", result.stdout)
 
-    def test_run_batch_matching_execution(self):
-        ret = run_batch_matching(self.csv_input, self.csv_output, caliper=0.2)
-        self.assertEqual(ret, 0)
-        self.assertTrue(os.path.exists(self.csv_output))
+    def test_json_demo_is_valid_json(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "synthetic_control_arm.cli", "--demo", "--json"],
+            cwd=Path(__file__).parents[1],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertIn("balance_assessment", payload)
+        self.assertIn("matched_pairs", payload)
 
-        with open(self.csv_output, mode="r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-        self.assertEqual(len(rows), 17)
-        self.assertIn("cohort_arm", rows[0])
-        self.assertIn("propensity_score", rows[0])
-        self.assertIn("hazard_ratio", rows[0])
-        self.assertIn("regulatory_tier", rows[0])
-
-    def test_cli_main_batch_subcommand(self):
-        ret = main(["batch", "-i", self.csv_input, "-o", self.csv_output])
-        self.assertEqual(ret, 0)
-        self.assertTrue(os.path.exists(self.csv_output))
-
-    def test_cli_main_demo(self):
-        ret = main(["--demo"])
-        self.assertEqual(ret, 0)
-
-    def test_format_sca_report(self):
-        subjects = generate_benchmark_synthetic_cohort(10, 30)
-        res = SyntheticControlAgentEngine.generate_synthetic_control_arm(subjects)
-        report = format_sca_report(res)
-        self.assertIn("SYNTHETIC CONTROL ARM (SCA)", report)
-        self.assertIn("COVARIATE BALANCE DIAGNOSTICS", report)
-        self.assertIn("COMPARATIVE CLINICAL EFFICACY", report)
+    def test_main_rejects_unknown_file_type(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cohort.txt"
+            path.write_text("x", encoding="utf-8")
+            self.assertEqual(main(["--file", str(path)]), 2)
 
 
 if __name__ == "__main__":
