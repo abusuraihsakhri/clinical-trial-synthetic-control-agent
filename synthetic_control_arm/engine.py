@@ -1,60 +1,59 @@
-"""
-Core Biostatistical Engine for Synthetic Control Arm (SCA) Generation
-Domain: Real-World Evidence (RWE), Propensity Score Matching & Survival Analysis
-Standards: FDA / EMA RWD Guidance, ISPOR-ISPE Good Research Practices
-"""
+"""Core propensity-score matching and matched-cohort outcome diagnostics."""
 
 import math
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
 from .models import (
+    CovariateBalance,
+    MatchedPair,
     MatchingMethod,
     RegulatoryAdequacyTier,
     SubjectRecord,
-    MatchedPair,
-    CovariateBalance,
     SurvivalCurvePoint,
     SyntheticControlAnalysisResult,
 )
 
 
 class BiostatisticalMath:
-    """Standard statistical math routines for RWE analytics."""
+    """Small dependency-free statistical helpers used by the engine."""
 
     @staticmethod
     def mean(values: List[float]) -> float:
-        if not values:
-            return 0.0
-        return sum(values) / len(values)
+        return 0.0 if not values else sum(values) / len(values)
 
     @staticmethod
     def variance(values: List[float], sample: bool = True) -> float:
         n = len(values)
         if n < 2:
             return 0.0
-        m = BiostatisticalMath.mean(values)
-        ss = sum((x - m) ** 2 for x in values)
-        return ss / (n - 1 if sample else n)
+        mean_value = BiostatisticalMath.mean(values)
+        denominator = n - 1 if sample else n
+        return sum((value - mean_value) ** 2 for value in values) / denominator
 
     @staticmethod
     def std_dev(values: List[float], sample: bool = True) -> float:
         return math.sqrt(BiostatisticalMath.variance(values, sample))
 
     @staticmethod
-    def standardized_mean_difference(treated: List[float], control: List[float]) -> float:
-        """
-        Calculate Standardized Mean Difference (SMD / Cohen's d):
-        SMD = (Mean_T - Mean_C) / sqrt((Var_T + Var_C) / 2)
+    def standardized_mean_difference(
+        treated: List[float], control: List[float]
+    ) -> float:
+        """Return the absolute SMD using the pooled within-group SD.
+
+        If both groups are constant but have different means, the standardized
+        difference is unbounded rather than zero. Empty groups are likewise not
+        interpretable and return infinity.
         """
         if not treated or not control:
-            return 0.0
-        m_t = BiostatisticalMath.mean(treated)
-        m_c = BiostatisticalMath.mean(control)
-        v_t = BiostatisticalMath.variance(treated)
-        v_c = BiostatisticalMath.variance(control)
-        pooled_sd = math.sqrt((v_t + v_c) / 2.0)
-        if pooled_sd < 1e-9:
-            return 0.0
-        return abs(m_t - m_c) / pooled_sd
+            return math.inf
+        mean_t = BiostatisticalMath.mean(treated)
+        mean_c = BiostatisticalMath.mean(control)
+        var_t = BiostatisticalMath.variance(treated)
+        var_c = BiostatisticalMath.variance(control)
+        pooled_sd = math.sqrt((var_t + var_c) / 2.0)
+        if pooled_sd < 1e-12:
+            return 0.0 if math.isclose(mean_t, mean_c, abs_tol=1e-12) else math.inf
+        return abs(mean_t - mean_c) / pooled_sd
 
     @staticmethod
     def sigmoid(z: float) -> float:
@@ -65,202 +64,229 @@ class BiostatisticalMath:
         return 1.0 / (1.0 + math.exp(-z))
 
     @staticmethod
-    def chi2_sf_1df(x: float) -> float:
-        """Survival function (p-value) for Chi-Square distribution with 1 degree of freedom."""
-        if x <= 0:
+    def logit(probability: float) -> float:
+        p = max(1e-12, min(1.0 - 1e-12, probability))
+        return math.log(p / (1.0 - p))
+
+    @staticmethod
+    def chi2_sf_1df(value: float) -> float:
+        if value <= 0:
             return 1.0
-        # P(Chi2(1) > x) = 2 * (1 - Phi(sqrt(x))) = erfc(sqrt(x/2))
-        return math.erfc(math.sqrt(x / 2.0))
+        return math.erfc(math.sqrt(value / 2.0))
 
 
 class PropensityScoreEngine:
-    """
-    Multivariate Propensity Score estimation via regularized logistic regression.
-    """
+    """Regularized logistic propensity-score model implemented without dependencies."""
 
     @classmethod
     def fit_and_predict_propensity_scores(
-        cls, subjects: List[SubjectRecord], covariate_names: List[str], iterations: int = 150, lr: float = 0.05
+        cls,
+        subjects: List[SubjectRecord],
+        covariate_names: List[str],
+        iterations: int = 300,
+        lr: float = 0.05,
     ) -> List[SubjectRecord]:
-        """
-        Fits logistic regression model P(T=1 | X) using batch gradient descent
-        and populates `propensity_score` on each subject.
-        """
         if not subjects or not covariate_names:
-            for s in subjects:
-                s.propensity_score = 0.5
+            for subject in subjects:
+                subject.propensity_score = 0.5
             return subjects
 
-        # Standardize covariates for stable gradient descent
-        mins: Dict[str, float] = {}
-        maxs: Dict[str, float] = {}
-        for c in covariate_names:
-            vals = [s.covariates.get(c, 0.0) for s in subjects]
-            min_v = min(vals)
-            max_v = max(vals)
-            spread = max_v - min_v if max_v != min_v else 1.0
-            mins[c] = min_v
-            maxs[c] = spread
+        means: Dict[str, float] = {}
+        scales: Dict[str, float] = {}
+        for covariate in covariate_names:
+            values = [subject.covariates[covariate] for subject in subjects]
+            means[covariate] = BiostatisticalMath.mean(values)
+            scale = BiostatisticalMath.std_dev(values)
+            scales[covariate] = scale if scale > 1e-12 else 1.0
 
-        # Normalize features
-        X_norm = []
-        Y = []
-        for s in subjects:
-            row = [1.0]  # Intercept
-            for c in covariate_names:
-                v = s.covariates.get(c, 0.0)
-                norm_v = (v - mins[c]) / maxs[c]
-                row.append(norm_v)
-            X_norm.append(row)
-            Y.append(1.0 if s.is_treated else 0.0)
+        design_matrix: List[List[float]] = []
+        outcomes: List[float] = []
+        for subject in subjects:
+            row = [1.0]
+            row.extend(
+                (subject.covariates[covariate] - means[covariate])
+                / scales[covariate]
+                for covariate in covariate_names
+            )
+            design_matrix.append(row)
+            outcomes.append(1.0 if subject.is_treated else 0.0)
 
-        n_features = len(covariate_names) + 1
         n_samples = len(subjects)
+        n_features = len(covariate_names) + 1
         weights = [0.0] * n_features
+        treated_fraction = max(0.01, min(0.99, sum(outcomes) / n_samples))
+        weights[0] = math.log(treated_fraction / (1.0 - treated_fraction))
 
-        # Initialize weights with prior log-odds
-        n_treated = sum(Y)
-        p_t = max(0.01, min(0.99, n_treated / n_samples))
-        weights[0] = math.log(p_t / (1.0 - p_t))
-
-        # Gradient Descent
         for _ in range(iterations):
             gradients = [0.0] * n_features
-            for i in range(n_samples):
-                z = sum(weights[j] * X_norm[i][j] for j in range(n_features))
-                p = BiostatisticalMath.sigmoid(z)
-                err = p - Y[i]
+            for i, row in enumerate(design_matrix):
+                probability = BiostatisticalMath.sigmoid(
+                    sum(weights[j] * row[j] for j in range(n_features))
+                )
+                error = probability - outcomes[i]
                 for j in range(n_features):
-                    gradients[j] += err * X_norm[i][j]
+                    gradients[j] += error * row[j]
 
-            # Update weights with L2 regularization
             for j in range(n_features):
-                reg = 0.01 * weights[j] if j > 0 else 0.0
-                weights[j] -= lr * (gradients[j] / n_samples + reg)
+                l2_penalty = 0.01 * weights[j] if j > 0 else 0.0
+                weights[j] -= lr * (gradients[j] / n_samples + l2_penalty)
 
-        # Predict scores
-        for i, s in enumerate(subjects):
-            z = sum(weights[j] * X_norm[i][j] for j in range(n_features))
-            ps = BiostatisticalMath.sigmoid(z)
-            # Bound propensity score away from 0 and 1
-            s.propensity_score = max(0.001, min(0.999, ps))
-
+        for subject, row in zip(subjects, design_matrix):
+            score = BiostatisticalMath.sigmoid(
+                sum(weights[j] * row[j] for j in range(n_features))
+            )
+            subject.propensity_score = max(0.001, min(0.999, score))
         return subjects
 
 
 class SurvivalAnalysisEngine:
-    """
-    Kaplan-Meier survival estimation, Log-Rank testing, and Hazard Ratio modeling.
-    """
+    """Kaplan-Meier estimation and log-rank score-test diagnostics."""
 
     @classmethod
-    def calculate_kaplan_meier(cls, subjects: List[SubjectRecord]) -> Tuple[List[SurvivalCurvePoint], float]:
-        """
-        Computes Kaplan-Meier survival curve and median survival time (months).
-        """
+    def calculate_kaplan_meier(
+        cls, subjects: List[SubjectRecord]
+    ) -> Tuple[List[SurvivalCurvePoint], Optional[float]]:
         if not subjects:
-            return [], 0.0
+            return [], None
 
-        # Sort by time ascending
-        sorted_sub = sorted(subjects, key=lambda s: s.time_to_event_months)
-        unique_times = sorted(list(set(s.time_to_event_months for s in sorted_sub)))
+        ordered = sorted(subjects, key=lambda subject: subject.time_to_event_months)
+        times = sorted({subject.time_to_event_months for subject in ordered})
+        curve = [SurvivalCurvePoint(0.0, len(ordered), 0, 0, 1.0)]
+        survival = 1.0
+        n_at_risk = len(ordered)
+        median_time: Optional[float] = None
 
-        curve = [SurvivalCurvePoint(0.0, len(sorted_sub), 0, 0, 1.0)]
-        current_surv = 1.0
-        n_at_risk = len(sorted_sub)
-        median_time = sorted_sub[-1].time_to_event_months
-
-        for t in unique_times:
-            events = sum(1 for s in sorted_sub if s.time_to_event_months == t and s.event_observed)
-            censored = sum(1 for s in sorted_sub if s.time_to_event_months == t and not s.event_observed)
-
-            if n_at_risk > 0 and events > 0:
-                step = 1.0 - (events / n_at_risk)
-                current_surv *= step
-
-            curve.append(SurvivalCurvePoint(t, n_at_risk, events, censored, current_surv))
-
-            if current_surv <= 0.5 and median_time == sorted_sub[-1].time_to_event_months:
-                median_time = t
-
-            n_at_risk -= (events + censored)
+        for time in times:
+            events = sum(
+                1
+                for subject in ordered
+                if subject.time_to_event_months == time and subject.event_observed
+            )
+            censored = sum(
+                1
+                for subject in ordered
+                if subject.time_to_event_months == time and not subject.event_observed
+            )
+            if n_at_risk > 0 and events:
+                survival *= 1.0 - events / n_at_risk
+            curve.append(
+                SurvivalCurvePoint(time, n_at_risk, events, censored, survival)
+            )
+            if median_time is None and survival <= 0.5:
+                median_time = time
+            n_at_risk -= events + censored
 
         return curve, median_time
 
     @classmethod
     def log_rank_test_and_hazard_ratio(
         cls, treated: List[SubjectRecord], control: List[SubjectRecord]
-    ) -> Tuple[float, float, float, float, float]:
-        """
-        Performs Mantel-Haenszel Log-Rank test and calculates Hazard Ratio (HR) with 95% CI.
-        Returns (HR, CI_low, CI_high, chi2_statistic, p_value).
+    ) -> Tuple[Optional[float], Optional[float], Optional[float], float, float]:
+        """Return a log-rank test and score-test approximation to the hazard ratio.
+
+        The hazard ratio is an approximation derived from the log-rank score and
+        information, not a fitted Cox proportional-hazards model.
         """
         all_subjects = treated + control
-        if not treated or not control or not any(s.event_observed for s in all_subjects):
-            return 1.0, 0.5, 2.0, 0.0, 1.0
+        if not treated or not control or not any(
+            subject.event_observed for subject in all_subjects
+        ):
+            return None, None, None, 0.0, 1.0
 
-        all_times = sorted(list(set(s.time_to_event_months for s in all_subjects if s.event_observed)))
+        event_times = sorted(
+            {
+                subject.time_to_event_months
+                for subject in all_subjects
+                if subject.event_observed
+            }
+        )
+        observed_treated = 0.0
+        expected_treated = 0.0
+        variance = 0.0
 
-        O_T = 0.0  # Observed events treated
-        E_T = 0.0  # Expected events treated
-        Var_T = 0.0
-
-        O_C = 0.0  # Observed events control
-        E_C = 0.0  # Expected events control
-
-        for t in all_times:
-            # Number at risk right before time t
-            n_t = sum(1 for s in treated if s.time_to_event_months >= t)
-            n_c = sum(1 for s in control if s.time_to_event_months >= t)
-            n_total = n_t + n_c
-
+        for time in event_times:
+            n_treated = sum(
+                1 for subject in treated if subject.time_to_event_months >= time
+            )
+            n_control = sum(
+                1 for subject in control if subject.time_to_event_months >= time
+            )
+            n_total = n_treated + n_control
             if n_total <= 1:
                 continue
 
-            # Number of events at time t
-            d_t = sum(1 for s in treated if s.time_to_event_months == t and s.event_observed)
-            d_c = sum(1 for s in control if s.time_to_event_months == t and s.event_observed)
-            d_total = d_t + d_c
-
-            if d_total == 0:
+            events_treated = sum(
+                1
+                for subject in treated
+                if subject.time_to_event_months == time and subject.event_observed
+            )
+            events_control = sum(
+                1
+                for subject in control
+                if subject.time_to_event_months == time and subject.event_observed
+            )
+            events_total = events_treated + events_control
+            if not events_total:
                 continue
 
-            O_T += d_t
-            O_C += d_c
+            observed_treated += events_treated
+            expected_treated += (n_treated / n_total) * events_total
+            variance += (
+                n_treated
+                * n_control
+                * events_total
+                * (n_total - events_total)
+                / ((n_total**2) * (n_total - 1))
+            )
 
-            e_t = (n_t / n_total) * d_total
-            e_c = (n_c / n_total) * d_total
-            E_T += e_t
-            E_C += e_c
+        if variance <= 1e-12:
+            return None, None, None, 0.0, 1.0
 
-            var_t = (n_t * n_c * d_total * (n_total - d_total)) / ((n_total ** 2) * (n_total - 1))
-            Var_T += var_t
+        score = observed_treated - expected_treated
+        chi2 = (score**2) / variance
+        p_value = BiostatisticalMath.chi2_sf_1df(chi2)
 
-        if Var_T > 1e-9:
-            chi2 = ((O_T - E_T) ** 2) / Var_T
-            p_val = BiostatisticalMath.chi2_sf_1df(chi2)
-        else:
-            chi2 = 0.0
-            p_val = 1.0
-
-        # Hazard ratio approximation: HR = (O_T / E_T) / (O_C / E_C)
-        if E_T > 0 and E_C > 0 and O_C > 0 and O_T > 0:
-            hr = (O_T / E_T) / (O_C / E_C)
-            se_ln_hr = math.sqrt((1.0 / E_T) + (1.0 / E_C))
-            ci_low = math.exp(math.log(hr) - 1.96 * se_ln_hr)
-            ci_high = math.exp(math.log(hr) + 1.96 * se_ln_hr)
-        else:
-            hr = 1.0
-            ci_low = 0.5
-            ci_high = 2.0
-
-        return hr, ci_low, ci_high, chi2, p_val
+        log_hr = score / variance
+        standard_error = math.sqrt(1.0 / variance)
+        hazard_ratio = math.exp(log_hr)
+        ci_low = math.exp(log_hr - 1.96 * standard_error)
+        ci_high = math.exp(log_hr + 1.96 * standard_error)
+        return hazard_ratio, ci_low, ci_high, chi2, p_value
 
 
 class SyntheticControlAgentEngine:
-    """
-    Main Orchestrator for Propensity Score Matching and Synthetic Control Arm Analysis.
-    """
+    """End-to-end propensity-score matching and matched-cohort analysis."""
+
+    @staticmethod
+    def _validate_subjects(
+        subjects: List[SubjectRecord], covariate_names: List[str]
+    ) -> None:
+        if not subjects:
+            raise ValueError("At least one subject is required.")
+        identifiers = [subject.subject_id.strip() for subject in subjects]
+        if any(not identifier for identifier in identifiers):
+            raise ValueError("subject_id must be non-empty for every subject.")
+        if len(set(identifiers)) != len(identifiers):
+            raise ValueError("subject_id values must be unique.")
+        if not covariate_names:
+            raise ValueError("At least one numeric baseline covariate is required.")
+
+        for subject in subjects:
+            if not math.isfinite(subject.time_to_event_months) or subject.time_to_event_months < 0:
+                raise ValueError(
+                    f"Invalid time_to_event_months for subject {subject.subject_id}."
+                )
+            missing = [name for name in covariate_names if name not in subject.covariates]
+            if missing:
+                raise ValueError(
+                    f"Subject {subject.subject_id} is missing covariates: {', '.join(missing)}."
+                )
+            for name in covariate_names:
+                value = subject.covariates[name]
+                if not math.isfinite(value):
+                    raise ValueError(
+                        f"Covariate {name!r} is not finite for subject {subject.subject_id}."
+                    )
 
     @classmethod
     def generate_synthetic_control_arm(
@@ -270,126 +296,149 @@ class SyntheticControlAgentEngine:
         caliper_sd_multiplier: float = 0.2,
         matching_method: MatchingMethod = MatchingMethod.NEAREST_NEIGHBOR_CALIPER,
     ) -> SyntheticControlAnalysisResult:
-        """
-        Executes end-to-end SCA creation:
-        1. Propensity score modeling
-        2. Caliper-based 1:1 Nearest-Neighbor matching
-        3. Pre/Post SMD balance verification
-        4. Kaplan-Meier and Cox/Log-Rank comparative survival analytics
-        5. Objective Response Rate (ORR) comparative analytics
-        6. Regulatory adequacy determination
-        """
-        treated_pool = [s for s in subjects if s.is_treated]
-        control_pool = [s for s in subjects if not s.is_treated]
-
+        treated_pool = [subject for subject in subjects if subject.is_treated]
+        control_pool = [subject for subject in subjects if not subject.is_treated]
         if not treated_pool or not control_pool:
-            raise ValueError("Input population must contain both treated (trial) and control (RWD) subjects.")
+            raise ValueError(
+                "Input population must contain both treated and control subjects."
+            )
+        if matching_method != MatchingMethod.NEAREST_NEIGHBOR_CALIPER:
+            raise NotImplementedError(
+                f"Matching method {matching_method.value} is not implemented."
+            )
+        if not math.isfinite(caliper_sd_multiplier) or caliper_sd_multiplier <= 0:
+            raise ValueError("caliper_sd_multiplier must be a finite value greater than zero.")
 
         if covariate_names is None:
-            # Discover common covariate names
-            covariate_names = sorted(list(set(k for s in subjects for k in s.covariates.keys())))
+            covariate_names = sorted(
+                set.intersection(*(set(subject.covariates) for subject in subjects))
+            ) if subjects else []
+        else:
+            covariate_names = list(dict.fromkeys(covariate_names))
+        cls._validate_subjects(subjects, covariate_names)
 
-        # 1. Fit Propensity Scores
-        PropensityScoreEngine.fit_and_predict_propensity_scores(subjects, covariate_names)
+        PropensityScoreEngine.fit_and_predict_propensity_scores(
+            subjects, covariate_names
+        )
 
-        # 2. Calculate caliper width based on logit of PS
-        ps_logits = [math.log(s.propensity_score / (1.0 - s.propensity_score)) for s in subjects if s.propensity_score is not None]
-        sd_logit_ps = BiostatisticalMath.std_dev(ps_logits)
-        caliper_width = caliper_sd_multiplier * sd_logit_ps if sd_logit_ps > 0 else 0.1
+        logits = [
+            BiostatisticalMath.logit(subject.propensity_score or 0.5)
+            for subject in subjects
+        ]
+        sd_logit_ps = BiostatisticalMath.std_dev(logits)
+        caliper_width = caliper_sd_multiplier * sd_logit_ps
+        if caliper_width <= 1e-12:
+            caliper_width = 1e-12
 
-        # 3. Perform 1:1 Nearest Neighbor Matching on PS
         matched_pairs: List[MatchedPair] = []
-        available_control = list(control_pool)
-
-        # Pre-match covariate statistics
-        balance_results: List[CovariateBalance] = []
-        pre_smd_list = []
-        post_smd_list = []
-
-        # Sort treated subjects
-        for t in sorted(treated_pool, key=lambda s: s.propensity_score or 0.5):
-            t_ps = t.propensity_score or 0.5
-            best_c = None
-            min_dist = float("inf")
-
-            for c in available_control:
-                c_ps = c.propensity_score or 0.5
-                dist = abs(t_ps - c_ps)
-                if dist <= caliper_width and dist < min_dist:
-                    min_dist = dist
-                    best_c = c
-
-            if best_c is not None:
+        available_controls = list(control_pool)
+        for treated in sorted(
+            treated_pool,
+            key=lambda subject: BiostatisticalMath.logit(
+                subject.propensity_score or 0.5
+            ),
+        ):
+            treated_ps = treated.propensity_score or 0.5
+            treated_logit = BiostatisticalMath.logit(treated_ps)
+            best_control: Optional[SubjectRecord] = None
+            best_distance = math.inf
+            for control in available_controls:
+                control_ps = control.propensity_score or 0.5
+                distance = abs(
+                    treated_logit - BiostatisticalMath.logit(control_ps)
+                )
+                if distance <= caliper_width and distance < best_distance:
+                    best_distance = distance
+                    best_control = control
+            if best_control is not None:
                 matched_pairs.append(
                     MatchedPair(
-                        treated_id=t.subject_id,
-                        control_id=best_c.subject_id,
-                        ps_distance=min_dist,
-                        treated_ps=t_ps,
-                        control_ps=best_c.propensity_score or 0.5,
+                        treated_id=treated.subject_id,
+                        control_id=best_control.subject_id,
+                        ps_distance=best_distance,
+                        treated_ps=treated_ps,
+                        control_ps=best_control.propensity_score or 0.5,
                     )
                 )
-                available_control.remove(best_c)
+                available_controls.remove(best_control)
 
-        matched_treated = [s for s in treated_pool if any(p.treated_id == s.subject_id for p in matched_pairs)]
-        matched_control = [s for s in control_pool if any(p.control_id == s.subject_id for p in matched_pairs)]
+        if not matched_pairs:
+            raise ValueError(
+                "No treated-control pairs met the propensity-score caliper. "
+                "Review overlap, covariates, or the caliper setting."
+            )
 
-        # If matching yielded 0 pairs, fallback to top available
-        if not matched_control:
-            matched_control = control_pool[:len(treated_pool)]
-            matched_treated = treated_pool[:len(matched_control)]
+        subject_by_id = {subject.subject_id: subject for subject in subjects}
+        matched_treated = [subject_by_id[pair.treated_id] for pair in matched_pairs]
+        matched_control = [subject_by_id[pair.control_id] for pair in matched_pairs]
 
-        # 4. Covariate Balance Diagnostics
-        for cov in covariate_names:
-            pre_t_vals = [s.covariates.get(cov, 0.0) for s in treated_pool]
-            pre_c_vals = [s.covariates.get(cov, 0.0) for s in control_pool]
-            post_t_vals = [s.covariates.get(cov, 0.0) for s in matched_treated]
-            post_c_vals = [s.covariates.get(cov, 0.0) for s in matched_control]
-
-            pre_smd = BiostatisticalMath.standardized_mean_difference(pre_t_vals, pre_c_vals)
-            post_smd = BiostatisticalMath.standardized_mean_difference(post_t_vals, post_c_vals)
-
-            pre_smd_list.append(pre_smd)
-            post_smd_list.append(post_smd)
-
+        balance_results: List[CovariateBalance] = []
+        pre_smd_values: List[float] = []
+        post_smd_values: List[float] = []
+        for covariate in covariate_names:
+            pre_treated = [subject.covariates[covariate] for subject in treated_pool]
+            pre_control = [subject.covariates[covariate] for subject in control_pool]
+            post_treated = [subject.covariates[covariate] for subject in matched_treated]
+            post_control = [subject.covariates[covariate] for subject in matched_control]
+            pre_smd = BiostatisticalMath.standardized_mean_difference(
+                pre_treated, pre_control
+            )
+            post_smd = BiostatisticalMath.standardized_mean_difference(
+                post_treated, post_control
+            )
+            pre_smd_values.append(pre_smd)
+            post_smd_values.append(post_smd)
             balance_results.append(
                 CovariateBalance(
-                    covariate_name=cov,
-                    pre_treated_mean=BiostatisticalMath.mean(pre_t_vals),
-                    pre_control_mean=BiostatisticalMath.mean(pre_c_vals),
+                    covariate_name=covariate,
+                    pre_treated_mean=BiostatisticalMath.mean(pre_treated),
+                    pre_control_mean=BiostatisticalMath.mean(pre_control),
                     pre_smd=pre_smd,
-                    post_treated_mean=BiostatisticalMath.mean(post_t_vals),
-                    post_control_mean=BiostatisticalMath.mean(post_c_vals),
+                    post_treated_mean=BiostatisticalMath.mean(post_treated),
+                    post_control_mean=BiostatisticalMath.mean(post_control),
                     post_smd=post_smd,
-                    is_balanced=(post_smd < 0.10),
+                    is_balanced=post_smd < 0.10,
                 )
             )
 
-        all_balanced = all(cb.is_balanced for cb in balance_results)
-        mean_pre_smd = BiostatisticalMath.mean(pre_smd_list)
-        mean_post_smd = BiostatisticalMath.mean(post_smd_list)
+        all_balanced = all(item.is_balanced for item in balance_results)
+        mean_pre_smd = BiostatisticalMath.mean(pre_smd_values)
+        mean_post_smd = BiostatisticalMath.mean(post_smd_values)
+        retention_pct = len(matched_pairs) / len(treated_pool) * 100.0
 
-        # 5. Comparative Survival Outcomes
-        _, med_os_t = SurvivalAnalysisEngine.calculate_kaplan_meier(matched_treated)
-        _, med_os_c = SurvivalAnalysisEngine.calculate_kaplan_meier(matched_control)
-        hr, ci_l, ci_h, chi2, p_val = SurvivalAnalysisEngine.log_rank_test_and_hazard_ratio(
-            matched_treated, matched_control
+        _, median_treated = SurvivalAnalysisEngine.calculate_kaplan_meier(matched_treated)
+        _, median_control = SurvivalAnalysisEngine.calculate_kaplan_meier(matched_control)
+        hr, ci_low, ci_high, chi2, p_value = (
+            SurvivalAnalysisEngine.log_rank_test_and_hazard_ratio(
+                matched_treated, matched_control
+            )
         )
 
-        # 6. Binary Efficacy (ORR)
-        orr_t = (sum(1 for s in matched_treated if s.response_achieved) / len(matched_treated) * 100.0) if matched_treated else 0.0
-        orr_c = (sum(1 for s in matched_control if s.response_achieved) / len(matched_control) * 100.0) if matched_control else 0.0
-        att_orr = orr_t - orr_c
+        orr_treated = (
+            sum(subject.response_achieved for subject in matched_treated)
+            / len(matched_treated)
+            * 100.0
+        )
+        orr_control = (
+            sum(subject.response_achieved for subject in matched_control)
+            / len(matched_control)
+            * 100.0
+        )
 
-        # 7. Regulatory Adequacy Tier
-        if all_balanced and mean_post_smd <= 0.08 and len(matched_pairs) >= int(0.75 * len(treated_pool)):
-            reg_tier = RegulatoryAdequacyTier.STRONG_REGULATORY_GRADE
-        elif mean_post_smd <= 0.15:
-            reg_tier = RegulatoryAdequacyTier.ACCEPTABLE_SUPPORTIVE
+        if all_balanced and mean_post_smd <= 0.08 and retention_pct >= 75.0:
+            tier = RegulatoryAdequacyTier.STRONG_REGULATORY_GRADE
+        elif mean_post_smd <= 0.15 and retention_pct >= 50.0:
+            tier = RegulatoryAdequacyTier.ACCEPTABLE_SUPPORTIVE
         else:
-            reg_tier = RegulatoryAdequacyTier.HIGH_CONFOUNDING_RISK
+            tier = RegulatoryAdequacyTier.HIGH_CONFOUNDING_RISK
 
-        recs = cls._generate_recommendations(reg_tier, all_balanced, len(matched_pairs), len(treated_pool), hr, p_val)
+        recommendations = cls._generate_recommendations(
+            tier=tier,
+            all_balanced=all_balanced,
+            retention_pct=retention_pct,
+            hazard_ratio=hr,
+            p_value=p_value,
+        )
 
         return SyntheticControlAnalysisResult(
             trial_arm_size=len(treated_pool),
@@ -402,56 +451,97 @@ class SyntheticControlAgentEngine:
             mean_absolute_smd_pre=mean_pre_smd,
             mean_absolute_smd_post=mean_post_smd,
             hazard_ratio=hr,
-            hazard_ratio_ci_low=ci_l,
-            hazard_ratio_ci_high=ci_h,
+            hazard_ratio_ci_low=ci_low,
+            hazard_ratio_ci_high=ci_high,
             log_rank_test_statistic=chi2,
-            log_rank_p_value=p_val,
-            median_survival_treated_months=med_os_t,
-            median_survival_synthetic_control_months=med_os_c,
-            orr_treated_pct=orr_t,
-            orr_synthetic_control_pct=orr_c,
-            att_orr_diff_pct=att_orr,
-            regulatory_adequacy_tier=reg_tier,
-            recommendations=recs,
+            log_rank_p_value=p_value,
+            median_survival_treated_months=median_treated,
+            median_survival_synthetic_control_months=median_control,
+            orr_treated_pct=orr_treated,
+            orr_synthetic_control_pct=orr_control,
+            att_orr_diff_pct=orr_treated - orr_control,
+            regulatory_adequacy_tier=tier,
+            recommendations=recommendations,
+            matched_pairs=matched_pairs,
+            matching_retention_pct=retention_pct,
         )
 
-    @classmethod
+    @staticmethod
     def _generate_recommendations(
-        cls, tier: RegulatoryAdequacyTier, all_balanced: bool, matched_n: int, treated_n: int, hr: float, p_val: float
+        tier: RegulatoryAdequacyTier,
+        all_balanced: bool,
+        retention_pct: float,
+        hazard_ratio: Optional[float],
+        p_value: float,
     ) -> List[str]:
-        recs = []
-        retention_pct = (matched_n / treated_n * 100.0) if treated_n > 0 else 0.0
-
+        recommendations = [
+            "Balance labels are tool-defined diagnostics, not regulatory determinations."
+        ]
         if tier == RegulatoryAdequacyTier.STRONG_REGULATORY_GRADE:
-            recs.append("Covariate balance meets stringent FDA/EMA RWE benchmark (SMD < 0.10 across all key confounders).")
+            recommendations.append(
+                "Matched covariates meet the conventional SMD < 0.10 balance benchmark with good treated-cohort retention."
+            )
         elif tier == RegulatoryAdequacyTier.ACCEPTABLE_SUPPORTIVE:
-            recs.append("Acceptable supportive evidence; consider doubly robust estimation (IPTW + outcome regression) to address mild residual variance.")
+            recommendations.append(
+                "Residual imbalance or overlap limitations remain; inspect individual SMDs and consider sensitivity analyses."
+            )
         else:
-            recs.append("High risk of residual unmeasured confounding. Expand RWD cohort or calibrate wider inclusion criteria.")
-
+            recommendations.append(
+                "Poor balance or limited overlap materially constrains interpretation; revise the cohort or adjustment strategy."
+            )
         if retention_pct < 80.0:
-            recs.append(f"Matching caliper excluded {100.0 - retention_pct:.1f}% of trial cohort. Evaluate caliper expansion or full optimal matching.")
+            recommendations.append(
+                f"Only {retention_pct:.1f}% of treated subjects were retained after caliper matching."
+            )
+        if not all_balanced:
+            recommendations.append(
+                "At least one measured covariate remains above the conventional absolute SMD threshold of 0.10."
+            )
+        if hazard_ratio is not None:
+            recommendations.append(
+                f"Matched-sample log-rank HR approximation = {hazard_ratio:.2f} (p={p_value:.4f}); this is not a fitted Cox model or proof of causality."
+            )
+        return recommendations
 
-        if hr < 0.70 and p_val < 0.05:
-            recs.append(f"Statistically significant OS benefit observed (HR={hr:.2f}, p={p_val:.4f}) versus Synthetic Control Arm.")
-        else:
-            recs.append(f"Treatment effect estimate (HR={hr:.2f}) does not demonstrate definitive statistical superiority against historical controls.")
 
-        return recs
+def _parse_bool(value: Any, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "t", "yes", "y"}:
+            return True
+        if normalized in {"false", "0", "f", "no", "n"}:
+            return False
+    raise ValueError(f"{field_name} must be a boolean value.")
 
 
 def parse_synthetic_cohort_dict(data: Dict[str, Any]) -> List[SubjectRecord]:
-    """Parse JSON/dictionary into List[SubjectRecord]."""
-    subjects = []
-    for raw in data.get("subjects", []):
+    raw_subjects = data.get("subjects")
+    if not isinstance(raw_subjects, list):
+        raise ValueError("JSON input must contain a 'subjects' array.")
+
+    subjects: List[SubjectRecord] = []
+    for index, raw in enumerate(raw_subjects, start=1):
+        if not isinstance(raw, dict):
+            raise ValueError(f"Subject {index} must be an object.")
+        covariates = raw.get("covariates", {})
+        if not isinstance(covariates, dict):
+            raise ValueError(f"Subject {index} covariates must be an object.")
         subjects.append(
             SubjectRecord(
-                subject_id=str(raw.get("subject_id", "SUBJ-UNKNOWN")),
-                is_treated=bool(raw.get("is_treated", False)),
-                covariates={str(k): float(v) for k, v in raw.get("covariates", {}).items()},
-                time_to_event_months=float(raw.get("time_to_event_months", 12.0)),
-                event_observed=bool(raw.get("event_observed", True)),
-                response_achieved=bool(raw.get("response_achieved", False)),
+                subject_id=str(raw.get("subject_id", "")).strip(),
+                is_treated=_parse_bool(raw.get("is_treated"), "is_treated"),
+                covariates={str(key): float(value) for key, value in covariates.items()},
+                time_to_event_months=float(raw.get("time_to_event_months")),
+                event_observed=_parse_bool(
+                    raw.get("event_observed"), "event_observed"
+                ),
+                response_achieved=_parse_bool(
+                    raw.get("response_achieved", False), "response_achieved"
+                ),
             )
         )
     return subjects

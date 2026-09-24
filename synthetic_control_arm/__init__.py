@@ -1,16 +1,5 @@
-"""
-Synthetic Control Arm Package - Real-World Evidence & Propensity Matching Engine
-"""
+"""Synthetic-control matching and matched-cohort diagnostics."""
 
-from .models import (
-    MatchingMethod,
-    RegulatoryAdequacyTier,
-    SubjectRecord,
-    MatchedPair,
-    CovariateBalance,
-    SurvivalCurvePoint,
-    SyntheticControlAnalysisResult,
-)
 from .engine import (
     BiostatisticalMath,
     PropensityScoreEngine,
@@ -18,8 +7,19 @@ from .engine import (
     SyntheticControlAgentEngine,
     parse_synthetic_cohort_dict,
 )
+from .models import (
+    BALANCE_ASSESSMENT_LABELS,
+    CovariateBalance,
+    MatchedPair,
+    MatchingMethod,
+    RegulatoryAdequacyTier,
+    SubjectRecord,
+    SurvivalCurvePoint,
+    SyntheticControlAnalysisResult,
+)
 
 __all__ = [
+    "BALANCE_ASSESSMENT_LABELS",
     "MatchingMethod",
     "RegulatoryAdequacyTier",
     "SubjectRecord",

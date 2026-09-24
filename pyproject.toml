@@ -1,27 +1,37 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "clinical-trial-synthetic-control-agent"
-version = "2.0.0"
-description = "Synthetic Control Arm: Propensity Score Matching & Survival Analysis Engine for Single-Arm Clinical Trials"
+version = "2.1.0"
+description = "Propensity-score matching and matched-cohort diagnostics for external-control analyses"
 readme = "README.md"
-authors = [{ name = "Clinical Computing Specialist" }]
-license = { text = "MIT" }
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Dr. Abu Suraih Sakhri" }]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
-    "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
-requires-python = ">=3.9"
 dependencies = []
 
 [project.scripts]
-clinical-trial-synthetic-control-agent = "cli:main"
+clinical-trial-synthetic-control-agent = "synthetic_control_arm.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["synthetic_control_arm*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+exclude = ["web"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]
