@@ -85,5 +85,28 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(main(["--file", str(path)]), 2)
 
 
+    def test_duplicate_normalized_csv_headers_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "duplicate.csv"
+            path.write_text(
+                "subject_id,is_treated,age, age,time_to_event_months,event_observed,response_achieved\n"
+                "T1,true,60,61,10,true,false\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "unique after trimming"):
+                load_cohort_from_csv(path)
+
+    def test_blank_csv_header_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "blank-header.csv"
+            path.write_text(
+                "subject_id,is_treated,,time_to_event_months,event_observed,response_achieved\n"
+                "T1,true,60,10,true,false\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "non-empty"):
+                load_cohort_from_csv(path)
+
+
 if __name__ == "__main__":
     unittest.main()
